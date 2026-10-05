@@ -1,0 +1,21 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Mohamed Fateen", email = "mohamed.fateen@greenmenconsulting.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "mcp[cli]>=2.2.0",
+    "psycopg>=3.3.6",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+backend = "backend:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
