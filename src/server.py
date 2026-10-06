@@ -1,3 +1,7 @@
+import logging
+
+import psycopg
+
 from mcp.server import MCPServer
 from psycopg import sql
 from pii_anonymizer import anonymize_data
@@ -8,24 +12,103 @@ from database import get_connection
 mcp = MCPServer("PostgreSQL MCP")
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _handle_exception(tool_name: str, exc: Exception) -> None:
+    """Convert database and application exceptions into useful MCP errors.
+
+    The original exception is preserved as the cause so debugging information
+    is not lost, while the raised error gives the MCP caller a clear message.
+    """
+
+    logger.exception("MCP tool '%s' failed", tool_name)
+
+    if isinstance(exc, ValueError):
+        raise ValueError(str(exc)) from exc
+
+    if isinstance(exc, psycopg.errors.UniqueViolation):
+        raise ValueError(
+            f"{tool_name}: a unique constraint was violated."
+        ) from exc
+
+    if isinstance(exc, psycopg.errors.ForeignKeyViolation):
+        raise ValueError(
+            f"{tool_name}: a foreign-key constraint was violated."
+        ) from exc
+
+    if isinstance(exc, psycopg.errors.NotNullViolation):
+        raise ValueError(
+            f"{tool_name}: a required column value is missing."
+        ) from exc
+
+    if isinstance(exc, psycopg.errors.CheckViolation):
+        raise ValueError(
+            f"{tool_name}: a database check constraint was violated."
+        ) from exc
+
+    if isinstance(exc, psycopg.errors.UndefinedTable):
+        raise ValueError(
+            f"{tool_name}: the requested table does not exist."
+        ) from exc
+
+    if isinstance(exc, psycopg.errors.UndefinedColumn):
+        raise ValueError(
+            f"{tool_name}: the requested column does not exist."
+        ) from exc
+
+    if isinstance(exc, psycopg.errors.InvalidCatalogName):
+        raise ValueError(
+            f"{tool_name}: the requested database does not exist."
+        ) from exc
+
+    if isinstance(exc, psycopg.errors.InsufficientPrivilege):
+        raise PermissionError(
+            f"{tool_name}: PostgreSQL permission denied."
+        ) from exc
+
+    if isinstance(exc, psycopg.OperationalError):
+        raise ConnectionError(
+            f"{tool_name}: could not connect to PostgreSQL."
+        ) from exc
+
+    if isinstance(exc, psycopg.Error):
+        raise RuntimeError(
+            f"{tool_name}: PostgreSQL operation failed."
+        ) from exc
+
+    raise RuntimeError(
+        f"{tool_name}: an unexpected error occurred."
+    ) from exc
+
+
 # DATABASE DISCOVERY
 @mcp.tool()
 def list_databases() -> list[str]:
     """List all PostgreSQL databases available to the current user."""
 
-    with get_connection("postgres") as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT datname
-                FROM pg_database
-                WHERE datallowconn = true
-                AND datistemplate = false
-                ORDER BY datname;
-                """
-            )
+    try:
 
-            return [row[0] for row in cur.fetchall()]
+        with get_connection("postgres") as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT datname
+                    FROM pg_database
+                    WHERE datallowconn = true
+                    AND datistemplate = false
+                    ORDER BY datname;
+                    """
+                )
+
+                return [row[0] for row in cur.fetchall()]
+    except Exception as exc:
+        _handle_exception("list_databases", exc)
 
 @mcp.tool()
 def create_database(database: str) -> dict:
@@ -36,54 +119,58 @@ def create_database(database: str) -> dict:
     database and creates the requested database.
     """
 
-    if not database:
-        raise ValueError("Database name cannot be empty.")
+    try:
 
-    # Basic validation for database name
-    if not database.replace("_", "").isalnum():
-        raise ValueError(
-            "Database name can contain only letters, "
-            "numbers, and underscores."
-        )
+        if not database:
+            raise ValueError("Database name cannot be empty.")
 
-    with get_connection("postgres") as conn:
-
-        # CREATE DATABASE must run outside a transaction
-        conn.autocommit = True
-
-        with conn.cursor() as cur:
-
-            # Check whether database already exists
-            cur.execute(
-                """
-                SELECT 1
-                FROM pg_database
-                WHERE datname = %s;
-                """,
-                (database,)
+        # Basic validation for database name
+        if not database.replace("_", "").isalnum():
+            raise ValueError(
+                "Database name can contain only letters, "
+                "numbers, and underscores."
             )
 
-            if cur.fetchone():
-                return {
-                    "status": "already_exists",
-                    "database": database,
-                    "message": f"Database '{database}' already exists."
-                }
+        with get_connection("postgres") as conn:
 
-            # Database name is validated above.
-            query = sql.SQL(
-                "CREATE DATABASE {}"
-            ).format(
-                sql.Identifier(database)
-            )
+            # CREATE DATABASE must run outside a transaction
+            conn.autocommit = True
 
-            cur.execute(query)
+            with conn.cursor() as cur:
 
-    return {
-        "status": "created",
-        "database": database,
-        "message": f"Database '{database}' created successfully."
-    }
+                # Check whether database already exists
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM pg_database
+                    WHERE datname = %s;
+                    """,
+                    (database,)
+                )
+
+                if cur.fetchone():
+                    return {
+                        "status": "already_exists",
+                        "database": database,
+                        "message": f"Database '{database}' already exists."
+                    }
+
+                # Database name is validated above.
+                query = sql.SQL(
+                    "CREATE DATABASE {}"
+                ).format(
+                    sql.Identifier(database)
+                )
+
+                cur.execute(query)
+
+        return {
+            "status": "created",
+            "database": database,
+            "message": f"Database '{database}' created successfully."
+        }
+    except Exception as exc:
+        _handle_exception("create_database", exc)
 
 
 @mcp.tool()
@@ -95,73 +182,81 @@ def delete_database(database: str) -> dict:
     The target database cannot be the current connection database.
     """
 
-    if not database:
-        raise ValueError("Database name cannot be empty.")
+    try:
 
-    if not database.replace("_", "").isalnum():
-        raise ValueError(
-            "Database name can contain only letters, "
-            "numbers, and underscores."
-        )
+        if not database:
+            raise ValueError("Database name cannot be empty.")
 
-    if database == "postgres":
-        raise ValueError("Deleting the postgres database is not allowed.")
-
-    with get_connection("postgres") as conn:
-        conn.autocommit = True
-
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT 1
-                FROM pg_database
-                WHERE datname = %s;
-                """,
-                (database,),
+        if not database.replace("_", "").isalnum():
+            raise ValueError(
+                "Database name can contain only letters, "
+                "numbers, and underscores."
             )
 
-            if not cur.fetchone():
-                return {
-                    "status": "not_found",
-                    "database": database,
-                    "message": f"Database '{database}' does not exist.",
-                }
+        if database == "postgres":
+            raise ValueError("Deleting the postgres database is not allowed.")
 
-            query = sql.SQL(
-                "DROP DATABASE {}"
-            ).format(
-                sql.Identifier(database)
-            )
+        with get_connection("postgres") as conn:
+            conn.autocommit = True
 
-            cur.execute(query)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM pg_database
+                    WHERE datname = %s;
+                    """,
+                    (database,),
+                )
 
-    return {
-        "status": "deleted",
-        "database": database,
-        "message": f"Database '{database}' deleted successfully.",
-    }
+                if not cur.fetchone():
+                    return {
+                        "status": "not_found",
+                        "database": database,
+                        "message": f"Database '{database}' does not exist.",
+                    }
+
+                query = sql.SQL(
+                    "DROP DATABASE {}"
+                ).format(
+                    sql.Identifier(database)
+                )
+
+                cur.execute(query)
+
+        return {
+            "status": "deleted",
+            "database": database,
+            "message": f"Database '{database}' deleted successfully.",
+        }
+    except Exception as exc:
+        _handle_exception("delete_database", exc)
 
 @mcp.tool()
 def database_info(database: str) -> dict:
     """Return basic information about a PostgreSQL database."""
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
+    try:
 
-            cur.execute("SELECT current_database();")
-            db_name = cur.fetchone()[0]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
 
-            cur.execute("SELECT current_user;")
-            user = cur.fetchone()[0]
+                cur.execute("SELECT current_database();")
+                db_name = cur.fetchone()[0]
 
-            cur.execute("SELECT version();")
-            version = cur.fetchone()[0]
+                cur.execute("SELECT current_user;")
+                user = cur.fetchone()[0]
 
-            return {
-                "database": db_name,
-                "user": user,
-                "version": version,
-            }
+                cur.execute("SELECT version();")
+                version = cur.fetchone()[0]
+
+                return {
+                    "database": db_name,
+                    "user": user,
+                    "version": version,
+                }
+    except Exception as exc:
+        _handle_exception("database_info", exc)
 
 
 # SCHEMA DISCOVERY
@@ -170,21 +265,25 @@ def database_info(database: str) -> dict:
 def list_schemas(database: str) -> list[str]:
     """List schemas in a PostgreSQL database."""
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT schema_name
-                FROM information_schema.schemata
-                WHERE schema_name NOT IN (
-                    'pg_catalog',
-                    'information_schema'
-                )
-                ORDER BY schema_name;
-                """
-            )
+    try:
 
-            return [row[0] for row in cur.fetchall()]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT schema_name
+                    FROM information_schema.schemata
+                    WHERE schema_name NOT IN (
+                        'pg_catalog',
+                        'information_schema'
+                    )
+                    ORDER BY schema_name;
+                    """
+                )
+
+                return [row[0] for row in cur.fetchall()]
+    except Exception as exc:
+        _handle_exception("list_schemas", exc)
 
 
 @mcp.tool()
@@ -194,20 +293,24 @@ def list_tables(
 ) -> list[str]:
     """List tables in a PostgreSQL database schema."""
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema = %s
-                AND table_type = 'BASE TABLE'
-                ORDER BY table_name;
-                """,
-                (schema,),
-            )
+    try:
 
-            return [row[0] for row in cur.fetchall()]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                    AND table_type = 'BASE TABLE'
+                    ORDER BY table_name;
+                    """,
+                    (schema,),
+                )
+
+                return [row[0] for row in cur.fetchall()]
+    except Exception as exc:
+        _handle_exception("list_tables", exc)
 
 
 @mcp.tool()
@@ -218,34 +321,38 @@ def describe_table(
 ) -> list[dict]:
     """Return column information for a PostgreSQL table."""
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    column_name,
-                    data_type,
-                    is_nullable,
-                    column_default
-                FROM information_schema.columns
-                WHERE table_schema = %s
-                AND table_name = %s
-                ORDER BY ordinal_position;
-                """,
-                (schema, table),
-            )
+    try:
 
-            rows = cur.fetchall()
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        column_name,
+                        data_type,
+                        is_nullable,
+                        column_default
+                    FROM information_schema.columns
+                    WHERE table_schema = %s
+                    AND table_name = %s
+                    ORDER BY ordinal_position;
+                    """,
+                    (schema, table),
+                )
 
-            return [
-                {
-                    "column_name": row[0],
-                    "data_type": row[1],
-                    "nullable": row[2],
-                    "default": row[3],
-                }
-                for row in rows
-            ]
+                rows = cur.fetchall()
+
+                return [
+                    {
+                        "column_name": row[0],
+                        "data_type": row[1],
+                        "nullable": row[2],
+                        "default": row[3],
+                    }
+                    for row in rows
+                ]
+    except Exception as exc:
+        _handle_exception("describe_table", exc)
 
 
 # READ OPERATIONS
@@ -263,30 +370,34 @@ def read_table(
     Only SELECT/read operations are performed.
     """
 
-    if limit < 1 or limit > 1000:
-        raise ValueError("limit must be between 1 and 1000")
+    try:
 
-    query = sql.SQL(
-        """
-        SELECT *
-        FROM {}.{}
-        LIMIT %s
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-    )
+        if limit < 1 or limit > 1000:
+            raise ValueError("limit must be between 1 and 1000")
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, (limit,))
+        query = sql.SQL(
+            """
+            SELECT *
+            FROM {}.{}
+            LIMIT %s
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+        )
 
-            columns = [column.name for column in cur.description]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (limit,))
 
-            return [
-                dict(zip(columns, row))
-                for row in cur.fetchall()
-            ]
+                columns = [column.name for column in cur.description]
+
+                return [
+                    dict(zip(columns, row))
+                    for row in cur.fetchall()
+                ]
+    except Exception as exc:
+        _handle_exception("read_table", exc)
 
 
 @mcp.tool()
@@ -300,26 +411,30 @@ def query(
     Only SELECT statements are allowed.
     """
 
-    cleaned_sql = sql_query.strip().lower()
+    try:
 
-    if not cleaned_sql.startswith("select"):
-        raise ValueError(
-            "Only SELECT queries are allowed."
-        )
+        cleaned_sql = sql_query.strip().lower()
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql_query)
+        if not cleaned_sql.startswith("select"):
+            raise ValueError(
+                "Only SELECT queries are allowed."
+            )
 
-            columns = [
-                column.name
-                for column in cur.description
-            ]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_query)
 
-            return [
-                dict(zip(columns, row))
-                for row in cur.fetchall()
-            ]
+                columns = [
+                    column.name
+                    for column in cur.description
+                ]
+
+                return [
+                    dict(zip(columns, row))
+                    for row in cur.fetchall()
+                ]
+    except Exception as exc:
+        _handle_exception("query", exc)
 
 
 @mcp.tool()
@@ -330,21 +445,25 @@ def count_rows(
 ) -> int:
     """Return the number of rows in a table."""
 
-    query = sql.SQL(
-        """
-        SELECT COUNT(*)
-        FROM {}.{}
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-    )
+    try:
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
+        query = sql.SQL(
+            """
+            SELECT COUNT(*)
+            FROM {}.{}
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+        )
 
-            return cur.fetchone()[0]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+
+                return cur.fetchone()[0]
+    except Exception as exc:
+        _handle_exception("count_rows", exc)
 
 
 # INSERT
@@ -367,43 +486,47 @@ def insert_row(
     }
     """
 
-    if not data:
-        raise ValueError("data cannot be empty")
+    try:
 
-    columns = list(data.keys())
-    values = list(data.values())
+        if not data:
+            raise ValueError("data cannot be empty")
 
-    query = sql.SQL(
-        """
-        INSERT INTO {}.{} ({})
-        VALUES ({})
-        RETURNING *
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-        sql.SQL(", ").join(
-            sql.Identifier(column)
-            for column in columns
-        ),
-        sql.SQL(", ").join(
-            sql.Placeholder()
-            for _ in values
-        ),
-    )
+        columns = list(data.keys())
+        values = list(data.values())
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, values)
+        query = sql.SQL(
+            """
+            INSERT INTO {}.{} ({})
+            VALUES ({})
+            RETURNING *
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.SQL(", ").join(
+                sql.Identifier(column)
+                for column in columns
+            ),
+            sql.SQL(", ").join(
+                sql.Placeholder()
+                for _ in values
+            ),
+        )
 
-            columns = [
-                column.name
-                for column in cur.description
-            ]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, values)
 
-            row = cur.fetchone()
+                columns = [
+                    column.name
+                    for column in cur.description
+                ]
 
-            return dict(zip(columns, row))
+                row = cur.fetchone()
+
+                return dict(zip(columns, row))
+    except Exception as exc:
+        _handle_exception("insert_row", exc)
 
 
 @mcp.tool()
@@ -419,48 +542,52 @@ def insert_rows(
     All rows must contain the same columns.
     """
 
-    if not rows:
-        raise ValueError("rows cannot be empty")
+    try:
 
-    columns = list(rows[0].keys())
+        if not rows:
+            raise ValueError("rows cannot be empty")
 
-    for row in rows:
-        if set(row.keys()) != set(columns):
-            raise ValueError(
-                "All rows must contain the same columns."
-            )
+        columns = list(rows[0].keys())
 
-    query = sql.SQL(
-        """
-        INSERT INTO {}.{} ({})
-        VALUES ({})
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-        sql.SQL(", ").join(
-            sql.Identifier(column)
-            for column in columns
-        ),
-        sql.SQL(", ").join(
-            sql.Placeholder()
-            for _ in columns
-        ),
-    )
+        for row in rows:
+            if set(row.keys()) != set(columns):
+                raise ValueError(
+                    "All rows must contain the same columns."
+                )
 
-    values = [
-        tuple(row[column] for column in columns)
-        for row in rows
-    ]
+        query = sql.SQL(
+            """
+            INSERT INTO {}.{} ({})
+            VALUES ({})
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.SQL(", ").join(
+                sql.Identifier(column)
+                for column in columns
+            ),
+            sql.SQL(", ").join(
+                sql.Placeholder()
+                for _ in columns
+            ),
+        )
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(query, values)
+        values = [
+            tuple(row[column] for column in columns)
+            for row in rows
+        ]
 
-            return {
-                "inserted": len(rows),
-                "table": table,
-            }
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.executemany(query, values)
+
+                return {
+                    "inserted": len(rows),
+                    "table": table,
+                }
+    except Exception as exc:
+        _handle_exception("insert_rows", exc)
 
 
 # UPDATE
@@ -489,54 +616,58 @@ def update_rows(
     }
     """
 
-    if not updates:
-        raise ValueError("updates cannot be empty")
+    try:
 
-    if not where:
-        raise ValueError(
-            "WHERE conditions are required. "
-            "Refusing to update the entire table."
+        if not updates:
+            raise ValueError("updates cannot be empty")
+
+        if not where:
+            raise ValueError(
+                "WHERE conditions are required. "
+                "Refusing to update the entire table."
+            )
+
+        set_parts = [
+            sql.SQL("{} = {}").format(
+                sql.Identifier(column),
+                sql.Placeholder(),
+            )
+            for column in updates
+        ]
+
+        where_parts = [
+            sql.SQL("{} = {}").format(
+                sql.Identifier(column),
+                sql.Placeholder(),
+            )
+            for column in where
+        ]
+
+        query = sql.SQL(
+            """
+            UPDATE {}.{}
+            SET {}
+            WHERE {}
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.SQL(", ").join(set_parts),
+            sql.SQL(" AND ").join(where_parts),
         )
 
-    set_parts = [
-        sql.SQL("{} = {}").format(
-            sql.Identifier(column),
-            sql.Placeholder(),
-        )
-        for column in updates
-    ]
+        values = list(updates.values()) + list(where.values())
 
-    where_parts = [
-        sql.SQL("{} = {}").format(
-            sql.Identifier(column),
-            sql.Placeholder(),
-        )
-        for column in where
-    ]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, values)
 
-    query = sql.SQL(
-        """
-        UPDATE {}.{}
-        SET {}
-        WHERE {}
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-        sql.SQL(", ").join(set_parts),
-        sql.SQL(" AND ").join(where_parts),
-    )
-
-    values = list(updates.values()) + list(where.values())
-
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, values)
-
-            return {
-                "updated_rows": cur.rowcount,
-                "table": table,
-            }
+                return {
+                    "updated_rows": cur.rowcount,
+                    "table": table,
+                }
+    except Exception as exc:
+        _handle_exception("update_rows", exc)
 
 
 # DELETE
@@ -555,41 +686,45 @@ def delete_rows(
     deletion of an entire table.
     """
 
-    if not where:
-        raise ValueError(
-            "WHERE conditions are required. "
-            "Refusing to delete the entire table."
+    try:
+
+        if not where:
+            raise ValueError(
+                "WHERE conditions are required. "
+                "Refusing to delete the entire table."
+            )
+
+        where_parts = [
+            sql.SQL("{} = {}").format(
+                sql.Identifier(column),
+                sql.Placeholder(),
+            )
+            for column in where
+        ]
+
+        query = sql.SQL(
+            """
+            DELETE FROM {}.{}
+            WHERE {}
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.SQL(" AND ").join(where_parts),
         )
 
-    where_parts = [
-        sql.SQL("{} = {}").format(
-            sql.Identifier(column),
-            sql.Placeholder(),
-        )
-        for column in where
-    ]
+        values = list(where.values())
 
-    query = sql.SQL(
-        """
-        DELETE FROM {}.{}
-        WHERE {}
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-        sql.SQL(" AND ").join(where_parts),
-    )
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, values)
 
-    values = list(where.values())
-
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, values)
-
-            return {
-                "deleted_rows": cur.rowcount,
-                "table": table,
-            }
+                return {
+                    "deleted_rows": cur.rowcount,
+                    "table": table,
+                }
+    except Exception as exc:
+        _handle_exception("delete_rows", exc)
 
 
 # TABLE STATISTICS
@@ -602,29 +737,33 @@ def table_stats(
 ) -> dict:
     """Return basic statistics about a PostgreSQL table."""
 
-    query = sql.SQL(
-        """
-        SELECT
-            COUNT(*) AS row_count
-        FROM {}.{}
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-    )
+    try:
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
+        query = sql.SQL(
+            """
+            SELECT
+                COUNT(*) AS row_count
+            FROM {}.{}
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+        )
 
-            row_count = cur.fetchone()[0]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
 
-            return {
-                "database": database,
-                "schema": schema,
-                "table": table,
-                "row_count": row_count,
-            }
+                row_count = cur.fetchone()[0]
+
+                return {
+                    "database": database,
+                    "schema": schema,
+                    "table": table,
+                    "row_count": row_count,
+                }
+    except Exception as exc:
+        _handle_exception("table_stats", exc)
 
 
 
@@ -642,67 +781,71 @@ def anonymize_and_insert(
     The original PII is never inserted into the database.
     """
 
-    if not data:
-        raise ValueError("data cannot be empty")
+    try:
 
-    # 1. Anonymize incoming data
+        if not data:
+            raise ValueError("data cannot be empty")
 
-    anonymized_data = anonymize_data(data)
+        # 1. Anonymize incoming data
 
-    columns = list(anonymized_data.keys())
-    values = list(anonymized_data.values())
+        anonymized_data = anonymize_data(data)
 
-    # 2. Build INSERT query
+        columns = list(anonymized_data.keys())
+        values = list(anonymized_data.values())
 
-    query = sql.SQL(
-        """
-        INSERT INTO {}.{} ({})
-        VALUES ({})
-        RETURNING *
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
+        # 2. Build INSERT query
 
-        sql.SQL(", ").join(
-            sql.Identifier(column)
-            for column in columns
-        ),
+        query = sql.SQL(
+            """
+            INSERT INTO {}.{} ({})
+            VALUES ({})
+            RETURNING *
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
 
-        sql.SQL(", ").join(
-            sql.Placeholder()
-            for _ in values
-        ),
-    )
+            sql.SQL(", ").join(
+                sql.Identifier(column)
+                for column in columns
+            ),
 
-    # 3. Insert anonymized data
+            sql.SQL(", ").join(
+                sql.Placeholder()
+                for _ in values
+            ),
+        )
 
-    with get_connection(database) as conn:
+        # 3. Insert anonymized data
 
-        with conn.cursor() as cur:
+        with get_connection(database) as conn:
 
-            cur.execute(
-                query,
-                values
-            )
+            with conn.cursor() as cur:
 
-            result_columns = [
-                column.name
-                for column in cur.description
-            ]
+                cur.execute(
+                    query,
+                    values
+                )
 
-            row = cur.fetchone()
+                result_columns = [
+                    column.name
+                    for column in cur.description
+                ]
 
-    inserted_row = dict(
-        zip(result_columns, row)
-    )
+                row = cur.fetchone()
 
-    return {
-        "status": "success",
-        "message": "Data anonymized and inserted successfully.",
-        "anonymized_data": anonymized_data,
-        "inserted_row": inserted_row,
-    }
+        inserted_row = dict(
+            zip(result_columns, row)
+        )
+
+        return {
+            "status": "success",
+            "message": "Data anonymized and inserted successfully.",
+            "anonymized_data": anonymized_data,
+            "inserted_row": inserted_row,
+        }
+    except Exception as exc:
+        _handle_exception("anonymize_and_insert", exc)
 
 
 @mcp.tool()
@@ -719,65 +862,69 @@ def anonymized_update(
     WHERE conditions are mandatory.
     """
 
-    if not updates:
-        raise ValueError("updates cannot be empty.")
+    try:
 
-    if not where:
-        raise ValueError(
-            "WHERE conditions are required. "
-            "Refusing to update the entire table."
+        if not updates:
+            raise ValueError("updates cannot be empty.")
+
+        if not where:
+            raise ValueError(
+                "WHERE conditions are required. "
+                "Refusing to update the entire table."
+            )
+
+        # Anonymize only the values being updated
+        anonymized_updates = anonymize_data(updates)
+
+        set_parts = [
+            sql.SQL("{} = {}").format(
+                sql.Identifier(column),
+                sql.Placeholder(),
+            )
+            for column in anonymized_updates
+        ]
+
+        where_parts = [
+            sql.SQL("{} = {}").format(
+                sql.Identifier(column),
+                sql.Placeholder(),
+            )
+            for column in where
+        ]
+
+        query = sql.SQL(
+            """
+            UPDATE {}.{}
+            SET {}
+            WHERE {}
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.SQL(", ").join(set_parts),
+            sql.SQL(" AND ").join(where_parts),
         )
 
-    # Anonymize only the values being updated
-    anonymized_updates = anonymize_data(updates)
-
-    set_parts = [
-        sql.SQL("{} = {}").format(
-            sql.Identifier(column),
-            sql.Placeholder(),
+        values = (
+            list(anonymized_updates.values())
+            + list(where.values())
         )
-        for column in anonymized_updates
-    ]
 
-    where_parts = [
-        sql.SQL("{} = {}").format(
-            sql.Identifier(column),
-            sql.Placeholder(),
-        )
-        for column in where
-    ]
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
 
-    query = sql.SQL(
-        """
-        UPDATE {}.{}
-        SET {}
-        WHERE {}
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-        sql.SQL(", ").join(set_parts),
-        sql.SQL(" AND ").join(where_parts),
-    )
+                cur.execute(query, values)
 
-    values = (
-        list(anonymized_updates.values())
-        + list(where.values())
-    )
+                updated_rows = cur.rowcount
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-
-            cur.execute(query, values)
-
-            updated_rows = cur.rowcount
-
-    return {
-        "status": "success",
-        "table": table,
-        "updated_rows": updated_rows,
-        "anonymized_updates": anonymized_updates,
-    }
+        return {
+            "status": "success",
+            "table": table,
+            "updated_rows": updated_rows,
+            "anonymized_updates": anonymized_updates,
+        }
+    except Exception as exc:
+        _handle_exception("anonymized_update", exc)
 
 
 
@@ -793,79 +940,83 @@ def anonymize_and_insert_rows(
     only anonymized records into PostgreSQL.
     """
 
-    if not rows:
-        raise ValueError("rows cannot be empty")
+    try:
 
-    # Anonymize every row
+        if not rows:
+            raise ValueError("rows cannot be empty")
 
-    anonymized_rows = [
-        anonymize_data(row)
-        for row in rows
-    ]
+        # Anonymize every row
+
+        anonymized_rows = [
+            anonymize_data(row)
+            for row in rows
+        ]
 
 
-    columns = list(anonymized_rows[0].keys())
+        columns = list(anonymized_rows[0].keys())
 
-    for row in anonymized_rows:
+        for row in anonymized_rows:
 
-        if set(row.keys()) != set(columns):
+            if set(row.keys()) != set(columns):
 
-            raise ValueError(
-                "All rows must contain the same columns."
-            )
+                raise ValueError(
+                    "All rows must contain the same columns."
+                )
 
-    # Build query
+        # Build query
 
-    query = sql.SQL(
-        """
-        INSERT INTO {}.{} ({})
-        VALUES ({})
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
+        query = sql.SQL(
+            """
+            INSERT INTO {}.{} ({})
+            VALUES ({})
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
 
-        sql.SQL(", ").join(
-            sql.Identifier(column)
-            for column in columns
-        ),
+            sql.SQL(", ").join(
+                sql.Identifier(column)
+                for column in columns
+            ),
 
-        sql.SQL(", ").join(
-            sql.Placeholder()
-            for _ in columns
-        ),
-    )
-
-    # Prepare values
-
-    values = [
-        tuple(
-            row[column]
-            for column in columns
+            sql.SQL(", ").join(
+                sql.Placeholder()
+                for _ in columns
+            ),
         )
-        for row in anonymized_rows
-    ]
 
-    # Insert
+        # Prepare values
 
-    with get_connection(database) as conn:
-
-        with conn.cursor() as cur:
-
-            cur.executemany(
-                query,
-                values
+        values = [
+            tuple(
+                row[column]
+                for column in columns
             )
+            for row in anonymized_rows
+        ]
 
-    return {
-        "status": "success",
-        "inserted": len(anonymized_rows),
-        "table": table,
-        "message": (
-            "All records were anonymized "
-            "before database insertion."
-        ),
-    }
+        # Insert
+
+        with get_connection(database) as conn:
+
+            with conn.cursor() as cur:
+
+                cur.executemany(
+                    query,
+                    values
+                )
+
+        return {
+            "status": "success",
+            "inserted": len(anonymized_rows),
+            "table": table,
+            "message": (
+                "All records were anonymized "
+                "before database insertion."
+            ),
+        }
+    except Exception as exc:
+        _handle_exception("anonymize_and_insert_rows", exc)
 
 
 @mcp.tool()
@@ -881,45 +1032,49 @@ def anonymized_delete(
     WHERE conditions are mandatory.
     """
 
-    if not where:
-        raise ValueError(
-            "WHERE conditions are required. "
-            "Refusing to delete the entire table."
+    try:
+
+        if not where:
+            raise ValueError(
+                "WHERE conditions are required. "
+                "Refusing to delete the entire table."
+            )
+
+        where_parts = [
+            sql.SQL("{} = {}").format(
+                sql.Identifier(column),
+                sql.Placeholder(),
+            )
+            for column in where
+        ]
+
+        query = sql.SQL(
+            """
+            DELETE FROM {}.{}
+            WHERE {}
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.SQL(" AND ").join(where_parts),
         )
 
-    where_parts = [
-        sql.SQL("{} = {}").format(
-            sql.Identifier(column),
-            sql.Placeholder(),
-        )
-        for column in where
-    ]
+        values = list(where.values())
 
-    query = sql.SQL(
-        """
-        DELETE FROM {}.{}
-        WHERE {}
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-        sql.SQL(" AND ").join(where_parts),
-    )
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
 
-    values = list(where.values())
+                cur.execute(query, values)
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
+                deleted_rows = cur.rowcount
 
-            cur.execute(query, values)
-
-            deleted_rows = cur.rowcount
-
-    return {
-        "status": "success",
-        "table": table,
-        "deleted_rows": deleted_rows,
-    }
+        return {
+            "status": "success",
+            "table": table,
+            "deleted_rows": deleted_rows,
+        }
+    except Exception as exc:
+        _handle_exception("anonymized_delete", exc)
 
 @mcp.tool()
 def create_table(
@@ -944,61 +1099,65 @@ def create_table(
     }
     """
 
-    if not table:
-        raise ValueError("Table name cannot be empty.")
+    try:
 
-    if not columns:
-        raise ValueError("columns cannot be empty.")
+        if not table:
+            raise ValueError("Table name cannot be empty.")
 
-    # Basic table-name validation
-    if not table.replace("_", "").isalnum():
-        raise ValueError(
-            "Table name can contain only letters, "
-            "numbers, and underscores."
-        )
+        if not columns:
+            raise ValueError("columns cannot be empty.")
 
-    # Build column definitions
-    column_definitions = []
-
-    for column_name, column_type in columns.items():
-
-        if not column_name.replace("_", "").isalnum():
+        # Basic table-name validation
+        if not table.replace("_", "").isalnum():
             raise ValueError(
-                f"Invalid column name: {column_name}"
+                "Table name can contain only letters, "
+                "numbers, and underscores."
             )
 
-        column_definitions.append(
-            sql.SQL("{} {}").format(
-                sql.Identifier(column_name),
-                sql.SQL(column_type)
+        # Build column definitions
+        column_definitions = []
+
+        for column_name, column_type in columns.items():
+
+            if not column_name.replace("_", "").isalnum():
+                raise ValueError(
+                    f"Invalid column name: {column_name}"
+                )
+
+            column_definitions.append(
+                sql.SQL("{} {}").format(
+                    sql.Identifier(column_name),
+                    sql.SQL(column_type)
+                )
             )
+
+        query = sql.SQL(
+            "CREATE TABLE {}.{} ({})"
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.SQL(", ").join(column_definitions)
         )
 
-    query = sql.SQL(
-        "CREATE TABLE {}.{} ({})"
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-        sql.SQL(", ").join(column_definitions)
-    )
+        with get_connection(database) as conn:
 
-    with get_connection(database) as conn:
+            with conn.cursor() as cur:
 
-        with conn.cursor() as cur:
+                cur.execute(query)
 
-            cur.execute(query)
-
-    return {
-        "status": "created",
-        "database": database,
-        "schema": schema,
-        "table": table,
-        "columns": columns,
-        "message": (
-            f"Table '{schema}.{table}' "
-            "created successfully."
-        ),
-    }
+        return {
+            "status": "created",
+            "database": database,
+            "schema": schema,
+            "table": table,
+            "columns": columns,
+            "message": (
+                f"Table '{schema}.{table}' "
+                "created successfully."
+            ),
+        }
+    except Exception as exc:
+        _handle_exception("create_table", exc)
 
 
 @mcp.tool()
@@ -1011,28 +1170,32 @@ def delete_table(
     Delete a PostgreSQL table.
     """
 
-    if not table:
-        raise ValueError("Table name cannot be empty.")
+    try:
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
+        if not table:
+            raise ValueError("Table name cannot be empty.")
 
-            query = sql.SQL(
-                "DROP TABLE IF EXISTS {}.{}"
-            ).format(
-                sql.Identifier(schema),
-                sql.Identifier(table),
-            )
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
 
-            cur.execute(query)
+                query = sql.SQL(
+                    "DROP TABLE IF EXISTS {}.{}"
+                ).format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                )
 
-    return {
-        "status": "deleted",
-        "database": database,
-        "schema": schema,
-        "table": table,
-        "message": f"Table '{schema}.{table}' deleted successfully.",
-    }
+                cur.execute(query)
+
+        return {
+            "status": "deleted",
+            "database": database,
+            "schema": schema,
+            "table": table,
+            "message": f"Table '{schema}.{table}' deleted successfully.",
+        }
+    except Exception as exc:
+        _handle_exception("delete_table", exc)
 
 
 @mcp.tool()
@@ -1054,73 +1217,77 @@ def alter_table(
     - drop_column
     """
 
-    if not table:
-        raise ValueError("Table name cannot be empty.")
+    try:
 
-    if not column:
-        raise ValueError("Column name cannot be empty.")
+        if not table:
+            raise ValueError("Table name cannot be empty.")
 
-    if operation == "add_column":
+        if not column:
+            raise ValueError("Column name cannot be empty.")
 
-        if not column_type:
-            raise ValueError(
-                "column_type is required when adding a column."
+        if operation == "add_column":
+
+            if not column_type:
+                raise ValueError(
+                    "column_type is required when adding a column."
+                )
+
+            query = sql.SQL(
+                "ALTER TABLE {}.{} ADD COLUMN {} {}"
+            ).format(
+                sql.Identifier(schema),
+                sql.Identifier(table),
+                sql.Identifier(column),
+                sql.SQL(column_type),
             )
 
-        query = sql.SQL(
-            "ALTER TABLE {}.{} ADD COLUMN {} {}"
-        ).format(
-            sql.Identifier(schema),
-            sql.Identifier(table),
-            sql.Identifier(column),
-            sql.SQL(column_type),
-        )
+        elif operation == "rename_column":
 
-    elif operation == "rename_column":
+            if not new_column:
+                raise ValueError(
+                    "new_column is required when renaming a column."
+                )
 
-        if not new_column:
-            raise ValueError(
-                "new_column is required when renaming a column."
+            query = sql.SQL(
+                "ALTER TABLE {}.{} RENAME COLUMN {} TO {}"
+            ).format(
+                sql.Identifier(schema),
+                sql.Identifier(table),
+                sql.Identifier(column),
+                sql.Identifier(new_column),
             )
 
-        query = sql.SQL(
-            "ALTER TABLE {}.{} RENAME COLUMN {} TO {}"
-        ).format(
-            sql.Identifier(schema),
-            sql.Identifier(table),
-            sql.Identifier(column),
-            sql.Identifier(new_column),
-        )
+        elif operation == "drop_column":
 
-    elif operation == "drop_column":
+            query = sql.SQL(
+                "ALTER TABLE {}.{} DROP COLUMN {}"
+            ).format(
+                sql.Identifier(schema),
+                sql.Identifier(table),
+                sql.Identifier(column),
+            )
 
-        query = sql.SQL(
-            "ALTER TABLE {}.{} DROP COLUMN {}"
-        ).format(
-            sql.Identifier(schema),
-            sql.Identifier(table),
-            sql.Identifier(column),
-        )
+        else:
+            raise ValueError(
+                "Unsupported operation. "
+                "Use add_column, rename_column, or drop_column."
+            )
 
-    else:
-        raise ValueError(
-            "Unsupported operation. "
-            "Use add_column, rename_column, or drop_column."
-        )
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
-
-    return {
-        "status": "success",
-        "database": database,
-        "schema": schema,
-        "table": table,
-        "operation": operation,
-        "column": column,
-        "message": "Table altered successfully.",
-    }
+        return {
+            "status": "success",
+            "database": database,
+            "schema": schema,
+            "table": table,
+            "operation": operation,
+            "column": column,
+            "message": "Table altered successfully.",
+        }
+    except Exception as exc:
+        _handle_exception("alter_table", exc)
 
 
 
@@ -1147,82 +1314,86 @@ def upsert_row(
     conflict_column = "customer_id"
     """
 
-    if not data:
-        raise ValueError("data cannot be empty.")
+    try:
 
-    if not conflict_column:
-        raise ValueError("conflict_column is required.")
+        if not data:
+            raise ValueError("data cannot be empty.")
 
-    if anonymize:
-        data = anonymize_data(data)
+        if not conflict_column:
+            raise ValueError("conflict_column is required.")
 
-    columns = list(data.keys())
-    values = list(data.values())
+        if anonymize:
+            data = anonymize_data(data)
 
-    update_columns = [
-        column
-        for column in columns
-        if column != conflict_column
-    ]
+        columns = list(data.keys())
+        values = list(data.values())
 
-    if not update_columns:
-        raise ValueError(
-            "At least one column besides the conflict column "
-            "is required."
+        update_columns = [
+            column
+            for column in columns
+            if column != conflict_column
+        ]
+
+        if not update_columns:
+            raise ValueError(
+                "At least one column besides the conflict column "
+                "is required."
+            )
+
+        insert_columns = sql.SQL(", ").join(
+            sql.Identifier(column)
+            for column in columns
         )
 
-    insert_columns = sql.SQL(", ").join(
-        sql.Identifier(column)
-        for column in columns
-    )
-
-    placeholders = sql.SQL(", ").join(
-        sql.Placeholder()
-        for _ in values
-    )
-
-    update_parts = sql.SQL(", ").join(
-        sql.SQL("{} = EXCLUDED.{}").format(
-            sql.Identifier(column),
-            sql.Identifier(column),
+        placeholders = sql.SQL(", ").join(
+            sql.Placeholder()
+            for _ in values
         )
-        for column in update_columns
-    )
 
-    query = sql.SQL(
-        """
-        INSERT INTO {}.{} ({})
-        VALUES ({})
-        ON CONFLICT ({})
-        DO UPDATE SET {}
-        RETURNING *
-        """
-    ).format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-        insert_columns,
-        placeholders,
-        sql.Identifier(conflict_column),
-        update_parts,
-    )
+        update_parts = sql.SQL(", ").join(
+            sql.SQL("{} = EXCLUDED.{}").format(
+                sql.Identifier(column),
+                sql.Identifier(column),
+            )
+            for column in update_columns
+        )
 
-    with get_connection(database) as conn:
-        with conn.cursor() as cur:
+        query = sql.SQL(
+            """
+            INSERT INTO {}.{} ({})
+            VALUES ({})
+            ON CONFLICT ({})
+            DO UPDATE SET {}
+            RETURNING *
+            """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            insert_columns,
+            placeholders,
+            sql.Identifier(conflict_column),
+            update_parts,
+        )
 
-            cur.execute(query, values)
+        with get_connection(database) as conn:
+            with conn.cursor() as cur:
 
-            result_columns = [
-                column.name
-                for column in cur.description
-            ]
+                cur.execute(query, values)
 
-            row = cur.fetchone()
+                result_columns = [
+                    column.name
+                    for column in cur.description
+                ]
 
-    return {
-        "status": "success",
-        "operation": "upsert",
-        "row": dict(zip(result_columns, row)),
-    }
+                row = cur.fetchone()
+
+        return {
+            "status": "success",
+            "operation": "upsert",
+            "row": dict(zip(result_columns, row)),
+        }
+    except Exception as exc:
+        _handle_exception("upsert_row", exc)
 
 # SERVER START
 if __name__ == "__main__":
