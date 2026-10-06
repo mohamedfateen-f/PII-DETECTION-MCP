@@ -9,7 +9,6 @@ mcp = MCPServer("PostgreSQL MCP")
 
 
 # DATABASE DISCOVERY
-
 @mcp.tool()
 def list_databases() -> list[str]:
     """List all PostgreSQL databases available to the current user."""
@@ -1226,6 +1225,5 @@ def upsert_row(
     }
 
 # SERVER START
-
 if __name__ == "__main__":
     mcp.run()
