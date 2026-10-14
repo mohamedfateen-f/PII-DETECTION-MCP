@@ -1,4 +1,3 @@
-"""Unit tests for server._handle_exception, the error translation helper."""
 
 import logging
 

@@ -85,7 +85,7 @@ uv run pytest tests/test_pii_anonymizer.py
 | # | Test case | What it verifies | Result |
 | --- | --- | --- | --- |
 | TC-001 | `TestPatterns::test_six_pii_patterns_are_registered` | `PII_PATTERNS` contains exactly EMAIL, PHONE, PAN, AADHAAR, CREDIT_CARD, IP_ADDRESS | PASS |
-| TC-002 | `TestPatterns::test_sensitive_column_set_matches_documentation` | `SENSITIVE_COLUMNS` equals the documented six column names | PASS |
+| TC-002 | `TestPatterns::test_detection_is_based_on_patterns_not_column_names` | `detect_pii()` locates PII in a value regardless of column name | PASS |
 | TC-003 | `TestPatterns::test_email_pattern_matches` | Email regex matches `john.doe@example.com` inside a sentence | PASS |
 | TC-004 | `TestPatterns::test_phone_pattern_matches_indian_numbers` | Phone regex matches `9876543210`, `+91 9876543210`, `+91-9876543210` | PASS |
 | TC-005 | `TestPatterns::test_phone_pattern_misses_country_code_without_separator` | `+919876543210` is **not** matched (no separator after `+91`) | PASS |
@@ -112,8 +112,8 @@ uv run pytest tests/test_pii_anonymizer.py
 | TC-026 | `TestAnonymizeText::test_unseparated_aadhaar_is_left_unchanged` | 12 digits without separators are not detected as Aadhaar | PASS |
 | TC-027 | `TestAnonymizeText::test_ip_octets_are_not_validated` | `999.999.999.999` → `999.999.XXX.XXX` (no 0–255 check) | PASS |
 | TC-028 | `TestAnonymizeData::test_sensitive_columns_are_masked_and_others_kept` | Full record: `Email/Phone/PAN/Aadhaar` masked, `Customer_ID/Name/City` unchanged | PASS |
-| TC-029 | `TestAnonymizeData::test_column_names_are_matched_case_insensitively` | `EMAIL`, `Phone`, `Ip_Address` keys are recognised | PASS |
-| TC-030 | `TestAnonymizeData::test_non_sensitive_column_keeps_pii_shaped_value` | `notes` containing an email is left untouched (column-driven design) | PASS |
+| TC-029 | `TestAnonymizeData::test_unlisted_column_names_are_masked` | Unlisted column names such as `contact_detail_1` are masked by pattern match | PASS |
+| TC-030 | `TestAnonymizeData::test_pii_inside_free_text_of_any_column_is_masked` | `notes` containing an email is masked (pattern-driven design) | PASS |
 | TC-031 | `TestAnonymizeData::test_original_dict_is_not_mutated` | Input dictionary is not modified in place | PASS |
 | TC-032 | `TestAnonymizeData::test_input_keys_are_preserved_in_order` | Output keeps the input key order | PASS |
 
@@ -310,10 +310,10 @@ Facts observed while the tests were executed; they are not guesses.
    server log (`TC-052`).
 7. **`upsert_row` returns every column** (`RETURNING *`), so columns that were
    not supplied come back as `None` (`TC-117`).
-8. **Anonymization is column-name driven.** Only the six columns in
-   `SENSITIVE_COLUMNS` are masked; a PII value in any other column (e.g.
-   `notes`) is stored untouched (`TC-030`), and `upsert_row` only masks when
-   `anonymize=True` (`TC-145`, `TC-146`).
+8. **Anonymization is pattern driven.** No column names are hard coded; a
+   value matching any `PII_PATTERNS` entry is masked regardless of its column
+   name (`TC-030`), and `upsert_row` only masks when `anonymize=True`
+   (`TC-145`, `TC-146`).
 9. **IP octets are not range-checked**: `999.999.999.999` is masked as an IP
    (`TC-027`).
 10. **Test isolation is clean.** Every integration test uses a temporary

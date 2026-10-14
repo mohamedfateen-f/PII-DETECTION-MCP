@@ -1,10 +1,11 @@
-"""Unit tests for src/pii_anonymizer.py (no database required)."""
+
 
 from pii_anonymizer import (
     PII_PATTERNS,
-    SENSITIVE_COLUMNS,
     anonymize_data,
     anonymize_text,
+    contains_pii,
+    detect_pii,
     mask_value,
 )
 
@@ -20,15 +21,18 @@ class TestPatterns:
             "IP_ADDRESS",
         }
 
-    def test_sensitive_column_set_matches_documentation(self):
-        assert SENSITIVE_COLUMNS == {
-            "email",
-            "phone",
-            "pan",
-            "aadhaar",
-            "credit_card",
-            "ip_address",
-        }
+    def test_detection_is_based_on_patterns_not_column_names(self):
+        matches = detect_pii("reach me on 9876543210")
+
+        assert [match["type"] for match in matches] == ["PHONE"]
+        assert matches[0]["value"] == "9876543210"
+
+    def test_contains_pii_ignores_non_pii_values(self):
+        assert contains_pii("john@example.com")
+        assert contains_pii(9876543210)
+        assert not contains_pii("Chennai")
+        assert not contains_pii(None)
+        assert not contains_pii(1001)
 
     def test_email_pattern_matches(self):
         assert PII_PATTERNS["EMAIL"].search("mail me at john.doe@example.com now")
@@ -38,9 +42,6 @@ class TestPatterns:
             assert PII_PATTERNS["PHONE"].search(value), value
 
     def test_phone_pattern_misses_country_code_without_separator(self):
-        # The optional "+91" group can never match at position 0 (no word
-        # boundary before '+'), and without a separator the remaining digits
-        # do not form a 10-digit match either.
         assert PII_PATTERNS["PHONE"].search("+919876543210") is None
 
     def test_pan_pattern_requires_uppercase_shape(self):
@@ -71,7 +72,6 @@ class TestMaskValue:
         assert mask_value("PHONE", "9876543210") == "******3210"
 
     def test_phone_with_country_code_keeps_last_four_digits(self):
-        # The country code is part of the matched digits, so it is masked too.
         assert mask_value("PHONE", "+91 9876543210") == "********3210"
 
     def test_pan_keeps_last_four_characters(self):
@@ -121,7 +121,6 @@ class TestAnonymizeText:
         assert anonymize_text("Chennai") == "Chennai"
 
     def test_country_code_prefix_survives_masking(self):
-        # The regex match starts after the space, so "+91 " stays untouched.
         assert anonymize_text("+91 9876543210") == "+91 ******3210"
 
     def test_lowercase_pan_is_left_unchanged(self):
@@ -131,14 +130,13 @@ class TestAnonymizeText:
         assert anonymize_text("123456789012") == "123456789012"
 
     def test_ip_octets_are_not_validated(self):
-        # The regex only checks the IPv4 shape, not the 0-255 range.
         assert (
             anonymize_text("999.999.999.999") == "999.999.XXX.XXX"
         )
 
 
 class TestAnonymizeData:
-    def test_sensitive_columns_are_masked_and_others_kept(self):
+    def test_pii_values_are_masked_and_other_values_kept(self):
         data = {
             "Customer_ID": 1001,
             "Name": "Mohamed Fateen",
@@ -159,20 +157,33 @@ class TestAnonymizeData:
             "City": "Chennai",
         }
 
-    def test_column_names_are_matched_case_insensitively(self):
-        data = {"EMAIL": "a@b.com", "Phone": "9876543210", "Ip_Address": "10.0.0.1"}
+    def test_unlisted_column_names_are_masked(self):
+        data = {
+            "contact_detail_1": "a@b.com",
+            "reach_me_at": "9876543210",
+            "last_seen_from": "10.0.0.1",
+        }
 
-        result = anonymize_data(data)
+        assert anonymize_data(data) == {
+            "contact_detail_1": "*@b.com",
+            "reach_me_at": "******3210",
+            "last_seen_from": "10.0.XXX.XXX",
+        }
 
-        assert result["EMAIL"] == "*@b.com"
-        assert result["Phone"] == "******3210"
-        assert result["Ip_Address"] == "10.0.XXX.XXX"
-
-    def test_non_sensitive_column_keeps_pii_shaped_value(self):
-        # Design decision: anonymization is driven by the column name only.
-        data = {"notes": "mail me at john@example.com"}
+    def test_values_without_pii_are_returned_unchanged(self):
+        data = {"customer_id": 1, "notes": "call later", "city": "Chennai"}
 
         assert anonymize_data(data) == data
+
+    def test_pii_inside_free_text_of_any_column_is_masked(self):
+        data = {"notes": "mail me at john@example.com"}
+
+        assert anonymize_data(data) == {
+            "notes": "mail me at j***@example.com"
+        }
+
+    def test_none_values_are_preserved(self):
+        assert anonymize_data({"email": None}) == {"email": None}
 
     def test_original_dict_is_not_mutated(self):
         data = {"name": "John", "email": "john@example.com"}

@@ -1,4 +1,4 @@
-"""Tests for the PII-aware (anonymizing) write tools."""
+
 
 import pytest
 
@@ -127,8 +127,6 @@ class TestAnonymizedUpdate:
         ) == [{"email": "n**@example.com"}]
 
     def test_where_values_are_used_verbatim(self, seeded_customers):
-        # The WHERE clause is not anonymized, so a raw PII value still matches
-        # a row that was inserted with raw PII.
         server.insert_row(
             seeded_customers,
             "customers",

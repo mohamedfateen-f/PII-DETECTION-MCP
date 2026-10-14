@@ -1,8 +1,10 @@
-"""Tests for schema discovery and the read-only query tools."""
+
 
 import pytest
 
+
 import server
+
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -114,7 +116,6 @@ class TestQuery:
         with pytest.raises(ValueError, match="Only SELECT queries are allowed"):
             server.query(seeded_customers, statement)
 
-        # the rejected statement had no effect
         assert server.count_rows(seeded_customers, "customers") == 3
 
     def test_invalid_sql_raises_runtime_error(self, customers_table):

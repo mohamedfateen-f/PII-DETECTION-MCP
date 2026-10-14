@@ -11,7 +11,7 @@ The database connection utility reads PostgreSQL credentials from environment va
 
 The PII anonymization component detects sensitive information such as email addresses, phone numbers, PAN numbers, Aadhaar numbers, credit-card numbers, and IP addresses. Detected values are masked before being stored or processed.
 
-A key design principle is that **only explicitly identified sensitive columns are anonymized**. Non-sensitive fields, such as `name` and `city`, remain unchanged.
+A key design principle is that **sensitivity is detected from the value itself using the PII patterns**, never from a hard-coded list of column names. Values that match no pattern, such as `name` and `city`, remain unchanged.
 
 ---
 
@@ -480,7 +480,7 @@ if text is None:
 
 ## 13.2 Detecting Matches
 
-The function iterates through every configured PII pattern:
+The matching itself lives in `detect_pii()`, which iterates through every configured PII pattern:
 
 ```python
 for pii_type, pattern in PII_PATTERNS.items():
@@ -510,7 +510,7 @@ This records:
 
 # 14. Right-to-Left Replacement
 
-Detected matches are sorted in reverse order:
+`detect_pii()` sorts the detected matches in reverse order:
 
 ```python
 matches.sort(
@@ -519,7 +519,7 @@ matches.sort(
 )
 ```
 
-The replacements are therefore performed from the end of the string toward the beginning.
+`anonymize_text()` then walks that list, so the replacements are performed from the end of the string toward the beginning.
 
 This is important because replacing text changes the string length.
 
@@ -529,24 +529,38 @@ Replacing from right to left prevents previously calculated positions from becom
 
 ---
 
-# 15. Sensitive Columns
+# 15. Pattern-Based PII Detection
 
-The module defines an explicit set of sensitive database columns:
+The module does not maintain a list of column names.
+
+Instead, every value is scanned with the regular expressions defined in `PII_PATTERNS`:
 
 ```python
-SENSITIVE_COLUMNS = {
-    "email",
-    "phone",
-    "pan",
-    "aadhaar",
-    "credit_card",
-    "ip_address",
+def detect_pii(value) -> list[dict]:
+```
+
+`detect_pii()` returns one entry per match:
+
+```python
+{
+    "type": "EMAIL",
+    "start": 9,
+    "end": 25,
+    "value": "john@ex.io"
 }
 ```
 
-This is an important part of the design.
+If the returned list is empty, the value contains no recognizable PII.
 
-Only these columns are automatically passed through the PII anonymization process.
+`contains_pii()` is a thin helper used by `anonymize_data()`:
+
+```python
+def contains_pii(value) -> bool:
+
+    return bool(detect_pii(value))
+```
+
+Because detection is value-based, a column named `notes` holding an email address is masked just like a column named `email`, and a newly added column requires no registration.
 
 ---
 
@@ -558,15 +572,13 @@ The `anonymize_data()` function processes an entire dictionary representing a da
 def anonymize_data(data: dict) -> dict:
 ```
 
-For every column:
+For every column, the value is tested against the PII patterns:
 
 ```python
-column_name = column.lower()
+if contains_pii(value):
 ```
 
-The column name is converted to lowercase before checking whether it is sensitive.
-
-If the column is sensitive:
+If PII is detected:
 
 ```python
 anonymized[column] = anonymize_text(value)
@@ -578,7 +590,7 @@ Otherwise:
 anonymized[column] = value
 ```
 
-Therefore, non-sensitive columns are preserved.
+Therefore, values that match no pattern are preserved unchanged and keep their original type.
 
 Example input:
 
@@ -602,7 +614,7 @@ Result:
 }
 ```
 
-The `name` field is **not anonymized** because `name` is not included in `SENSITIVE_COLUMNS`.
+The `name` field is **not anonymized** because the value `"John"` matches no PII pattern.
 
 ---
 
@@ -614,18 +626,15 @@ The overall anonymization flow is:
 Input Data
     |
     v
-Check each column
+Check each value
     |
     v
-Is column sensitive?
+Does the value match a PII pattern?
    / \
  Yes  No
   |    |
   v    v
-Detect PII   Keep value unchanged
-  |
-  v
-Apply masking
+Apply masking   Keep value unchanged
   |
   v
 Return anonymized data
@@ -637,7 +646,7 @@ For a database record:
 Incoming Record
        |
        v
-anonymize_data()
+ anonymize_data()
        |
        +---- name ---------> unchanged
        |
@@ -663,9 +672,9 @@ Anonymized Record
 
 # 18. Security Design
 
-The module follows a column-based anonymization approach.
+The module follows a value-based anonymization approach.
 
-Instead of anonymizing every string value indiscriminately, it first checks whether the column is explicitly classified as sensitive.
+Instead of anonymizing every string value indiscriminately, it first checks whether the value actually matches one of the `PII_PATTERNS` regular expressions.
 
 This prevents fields such as:
 
@@ -699,6 +708,22 @@ produces:
 }
 ```
 
+The same record with an unrecognised column name is handled identically:
+
+```python
+{
+    "contact_detail_1": "john@example.com"
+}
+```
+
+produces:
+
+```python
+{
+    "contact_detail_1": "j***@example.com"
+}
+```
+
 ---
 
 # 19. Configuration and Extensibility
@@ -713,17 +738,12 @@ For example, a new PII type can be introduced by adding:
 
 A corresponding masking rule can then be added to `mask_value()`.
 
-If the new PII type is associated with a specific database column, that column should also be added to:
-
-```python
-SENSITIVE_COLUMNS
-```
+No other change is needed. Detection, record-level processing, and any database column that happens to hold such a value are covered automatically.
 
 This separates:
 
-1. **PII detection**
-2. **PII masking**
-3. **Sensitive-column classification**
+1. **PII detection** (`PII_PATTERNS`, `detect_pii()`)
+2. **PII masking** (`mask_value()`, `anonymize_text()`)
 
 and makes the implementation easier to extend.
 
@@ -791,7 +811,7 @@ result = anonymize_data(data)
 }
 ```
 
-The sensitive information is masked while non-sensitive fields remain unchanged.
+The sensitive information is masked while values that match no PII pattern remain unchanged.
 
 ---
 
@@ -801,14 +821,106 @@ This module provides a reusable foundation for protecting PII before data is pro
 
 ### Main components
 
-| Component           | Responsibility                                         |
-| ------------------- | ------------------------------------------------------ |
-| `load_dotenv()`     | Load environment configuration                         |
-| `get_connection()`  | Create PostgreSQL connections                          |
-| `PII_PATTERNS`      | Define detectable PII patterns                         |
-| `mask_value()`      | Apply type-specific masking                            |
-| `anonymize_text()`  | Detect and mask PII inside text                        |
-| `SENSITIVE_COLUMNS` | Identify columns requiring anonymization               |
-| `anonymize_data()`  | Anonymize sensitive fields while preserving other data |
+| Component          | Responsibility                                        |
+| ------------------ | ----------------------------------------------------- |
+| `load_dotenv()`    | Load environment configuration                        |
+| `get_connection()` | Create PostgreSQL connections                         |
+| `PII_PATTERNS`     | Define detectable PII patterns                        |
+| `mask_value()`     | Apply type-specific masking                           |
+| `detect_pii()`     | Locate PII occurrences inside a value                 |
+| `contains_pii()`   | Report whether a value matches any PII pattern        |
+| `anonymize_text()` | Detect and mask PII inside text                       |
+| `anonymize_data()` | Mask PII values while preserving all other values     |
 
-The key behavior is that **PII is anonymized only when the corresponding field is classified as sensitive**, preventing unrelated fields such as `name` from being accidentally modified.
+The key behavior is that **PII is anonymized whenever a value matches one of the PII patterns**, so no column names are hard coded and unrelated fields such as `name` are not accidentally modified.
+
+---
+
+# 23. Human-in-the-Loop Confirmation for DML/DDL Tools
+
+## 23.1 Problem
+
+Every mutating tool previously ran the moment the agent called it. An agent that
+misjudges a `DELETE` scope, or invents a table name, destroys data with no human
+in the loop.
+
+## 23.2 Mechanism
+
+The server now blocks every mutating tool behind an MCP **elicitation**
+(`elicitation/create`). Before the tool function runs, the server asks the
+connected client to render an approval prompt carrying the actual target, the
+values, and the risk label. The `tools/call` request stays pending until the
+human answers.
+
+The gate lives in `src/confirmation.py` and is registered as **server
+middleware**, not inside the tools:
+
+```python
+mcp = MCPServer(
+    "PostgreSQL MCP",
+    middleware=[ConfirmationMiddleware(confirmation_settings)],
+)
+```
+
+Middleware runs ahead of every `tools/call`, which has two consequences worth
+noting:
+
+* the 23 tool functions keep their current signatures, so the test suite can
+  still call them directly as plain synchronous Python functions;
+* the check is a single choke point, so a mutating tool added later is guarded
+  by adding its name to `MUTATING_TOOLS` — there is no per-tool code to repeat.
+
+## 23.3 Guarded tools
+
+`MUTATING_TOOLS` covers the DML and DDL families:
+
+| Family    | Tools                                                                                                                                        |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| DML       | `insert_row`, `insert_rows`, `update_rows`, `delete_rows`, `upsert_row`, `anonymize_and_insert`, `anonymize_and_insert_rows`, `anonymized_update`, `anonymized_delete` |
+| DDL       | `create_table`, `delete_table`, `alter_table`, `create_database`, `delete_database`                                                           |
+
+The read-only tools (`read_table`, `query`, `describe_table`, …) pass straight
+through and never prompt.
+
+Two secondary sets drive the wording of the prompt: `DESTRUCTIVE_TOOLS`
+(`delete_*`, `alter_table`) and `ANONYMIZING_TOOLS`, which notes that PII is
+masked on the way in.
+
+## 23.4 Failure modes
+
+The gate fails **closed** in every ambiguous case:
+
+| Situation                                       | Behaviour                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------- |
+| User answers "approve"                          | The tool runs.                                                |
+| User answers "cancel"/"decline", or dismisses   | Tool never runs; agent gets `isError` with a decline message. |
+| Client omits the checkbox (empty answer)        | Treated as a decline — the field defaults to `false`.         |
+| Client never advertises `elicitation`           | Refused with an explanatory error.                            |
+| Client supports URL mode but not form mode      | Refused (a form request would fail at protocol level).         |
+| Elicitation raises mid-prompt                   | Refused; the write does not happen.                            |
+
+Denials return a `CallToolResult` with `is_error` set rather than a
+JSON-RPC-level error, so the agent can read the reason and adjust.
+
+## 23.5 Configuration
+
+| Variable                        | Default | Effect                                                                |
+| -------------------------------- | ------- | --------------------------------------------------------------------- |
+| `PG_MCP_CONFIRM_DML`             | `1`     | `0`/`false`/`off` disables the gate. Trusted single-user setups only.  |
+| `PG_MCP_DML_ALLOWLIST`           | empty   | Comma-separated tool names that skip the prompt.                      |
+| `PG_MCP_DML_ALLOW_NO_ELICITATION`| `0`     | `1` lets a client with no elicitation support write unattended.        |
+
+Both flags accept `1/true/yes/on` and `0/false/no/off`; anything else logs a
+warning and falls back to the default.
+
+## 23.6 Tests
+
+| File                             | Scope                                                                |
+| -------------------------------- | -------------------------------------------------------------------- |
+| `tests/test_dml_confirmation.py` | 81 unit tests over settings, capability detection, the gate, prompts. |
+| `tests/test_confirmation_e2e.py` | 6 end-to-end tests over a live JSON-RPC session and a real database.  |
+
+The end-to-end tests drive the server through a genuine MCP client session and
+assert on real database effects: an approved insert lands a row, a declined
+`delete_table` leaves the table intact, an approved one removes it, and a client
+that advertises no elicitation capability is refused.

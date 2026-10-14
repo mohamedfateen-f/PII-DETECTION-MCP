@@ -1,10 +1,13 @@
-"""Tests for the schema and write tools (CRUD plus ALTER)."""
+
 
 import pytest
 
+
 import server
 
+
 pytestmark = pytest.mark.requires_postgres
+
 
 CUSTOMER_COLUMNS = {
     "customer_id": "INTEGER PRIMARY KEY",
@@ -220,7 +223,6 @@ class TestUpsertRow:
         assert result["row"]["customer_id"] == 9
         assert result["row"]["name"] == "Ups"
         assert result["row"]["city"] == "Kochi"
-        # RETURNING * gives every column, including the ones not supplied
         assert result["row"]["email"] is None
         assert result["row"]["phone"] is None
 

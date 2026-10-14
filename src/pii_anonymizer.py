@@ -85,12 +85,12 @@ def mask_value(pii_type: str, value: str) -> str:
     return "*" * len(value)
 
 
-def anonymize_text(text: str) -> str:
+def detect_pii(value) -> list[dict]:
 
-    if text is None:
-        return text
+    if value is None:
+        return []
 
-    text = str(text)
+    text = value if isinstance(value, str) else str(value)
 
     matches = []
 
@@ -105,15 +105,27 @@ def anonymize_text(text: str) -> str:
                 "value": match.group()
             })
 
-    # Replace from right to left
-    # so indexes remain valid.
-
     matches.sort(
         key=lambda item: item["start"],
         reverse=True
     )
 
-    for match in matches:
+    return matches
+
+
+def contains_pii(value) -> bool:
+
+    return bool(detect_pii(value))
+
+
+def anonymize_text(text: str) -> str:
+
+    if text is None:
+        return text
+
+    text = str(text)
+
+    for match in detect_pii(text):
 
         replacement = mask_value(
             match["type"],
@@ -129,29 +141,18 @@ def anonymize_text(text: str) -> str:
     return text
 
 
-SENSITIVE_COLUMNS = {
-    "email",
-    "phone",
-    "pan",
-    "aadhaar",
-    "credit_card",
-    "ip_address",
-}
-
-
 def anonymize_data(data: dict) -> dict:
 
     anonymized = {}
 
     for column, value in data.items():
 
-        column_name = column.lower()
+        if contains_pii(value):
 
-        if column_name in SENSITIVE_COLUMNS:
             anonymized[column] = anonymize_text(value)
 
         else:
-            # Keep non-sensitive fields unchanged
+
             anonymized[column] = value
 
     return anonymized

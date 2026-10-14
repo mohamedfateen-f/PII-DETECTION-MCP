@@ -1,15 +1,16 @@
 import logging
 
+
 import psycopg
+
 
 from mcp.server import MCPServer
 from psycopg import sql
 from pii_anonymizer import anonymize_data
 
+
+from confirmation import ConfirmationMiddleware, ConfirmationSettings
 from database import get_connection
-
-
-mcp = MCPServer("PostgreSQL MCP")
 
 
 logging.basicConfig(
@@ -17,7 +18,23 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
+
 logger = logging.getLogger(__name__)
+
+
+confirmation_settings = ConfirmationSettings.from_env()
+
+
+mcp = MCPServer(
+    "PostgreSQL MCP",
+    middleware=[ConfirmationMiddleware(confirmation_settings)],
+)
+
+
+logger.info(
+    "DML confirmation: %s",
+    "disabled" if not confirmation_settings.enabled else "enabled",
+)
 
 
 def _handle_exception(tool_name: str, exc: Exception) -> None:
@@ -87,7 +104,6 @@ def _handle_exception(tool_name: str, exc: Exception) -> None:
     ) from exc
 
 
-# DATABASE DISCOVERY
 @mcp.tool()
 def list_databases() -> list[str]:
     """List all PostgreSQL databases available to the current user."""
@@ -110,6 +126,7 @@ def list_databases() -> list[str]:
     except Exception as exc:
         _handle_exception("list_databases", exc)
 
+
 @mcp.tool()
 def create_database(database: str) -> dict:
     """
@@ -124,7 +141,6 @@ def create_database(database: str) -> dict:
         if not database:
             raise ValueError("Database name cannot be empty.")
 
-        # Basic validation for database name
         if not database.replace("_", "").isalnum():
             raise ValueError(
                 "Database name can contain only letters, "
@@ -133,12 +149,10 @@ def create_database(database: str) -> dict:
 
         with get_connection("postgres") as conn:
 
-            # CREATE DATABASE must run outside a transaction
             conn.autocommit = True
 
             with conn.cursor() as cur:
 
-                # Check whether database already exists
                 cur.execute(
                     """
                     SELECT 1
@@ -155,7 +169,6 @@ def create_database(database: str) -> dict:
                         "message": f"Database '{database}' already exists."
                     }
 
-                # Database name is validated above.
                 query = sql.SQL(
                     "CREATE DATABASE {}"
                 ).format(
@@ -232,6 +245,7 @@ def delete_database(database: str) -> dict:
     except Exception as exc:
         _handle_exception("delete_database", exc)
 
+
 @mcp.tool()
 def database_info(database: str) -> dict:
     """Return basic information about a PostgreSQL database."""
@@ -258,8 +272,6 @@ def database_info(database: str) -> dict:
     except Exception as exc:
         _handle_exception("database_info", exc)
 
-
-# SCHEMA DISCOVERY
 
 @mcp.tool()
 def list_schemas(database: str) -> list[str]:
@@ -354,8 +366,6 @@ def describe_table(
     except Exception as exc:
         _handle_exception("describe_table", exc)
 
-
-# READ OPERATIONS
 
 @mcp.tool()
 def read_table(
@@ -465,8 +475,6 @@ def count_rows(
     except Exception as exc:
         _handle_exception("count_rows", exc)
 
-
-# INSERT
 
 @mcp.tool()
 def insert_row(
@@ -590,8 +598,6 @@ def insert_rows(
         _handle_exception("insert_rows", exc)
 
 
-# UPDATE
-
 @mcp.tool()
 def update_rows(
     database: str,
@@ -670,8 +676,6 @@ def update_rows(
         _handle_exception("update_rows", exc)
 
 
-# DELETE
-
 @mcp.tool()
 def delete_rows(
     database: str,
@@ -727,8 +731,6 @@ def delete_rows(
         _handle_exception("delete_rows", exc)
 
 
-# TABLE STATISTICS
-
 @mcp.tool()
 def table_stats(
     database: str,
@@ -766,7 +768,6 @@ def table_stats(
         _handle_exception("table_stats", exc)
 
 
-
 @mcp.tool()
 def anonymize_and_insert(
     database: str,
@@ -786,14 +787,10 @@ def anonymize_and_insert(
         if not data:
             raise ValueError("data cannot be empty")
 
-        # 1. Anonymize incoming data
-
         anonymized_data = anonymize_data(data)
 
         columns = list(anonymized_data.keys())
         values = list(anonymized_data.values())
-
-        # 2. Build INSERT query
 
         query = sql.SQL(
             """
@@ -815,8 +812,6 @@ def anonymize_and_insert(
                 for _ in values
             ),
         )
-
-        # 3. Insert anonymized data
 
         with get_connection(database) as conn:
 
@@ -873,7 +868,6 @@ def anonymized_update(
                 "Refusing to update the entire table."
             )
 
-        # Anonymize only the values being updated
         anonymized_updates = anonymize_data(updates)
 
         set_parts = [
@@ -927,7 +921,6 @@ def anonymized_update(
         _handle_exception("anonymized_update", exc)
 
 
-
 @mcp.tool()
 def anonymize_and_insert_rows(
     database: str,
@@ -945,13 +938,10 @@ def anonymize_and_insert_rows(
         if not rows:
             raise ValueError("rows cannot be empty")
 
-        # Anonymize every row
-
         anonymized_rows = [
             anonymize_data(row)
             for row in rows
         ]
-
 
         columns = list(anonymized_rows[0].keys())
 
@@ -962,8 +952,6 @@ def anonymize_and_insert_rows(
                 raise ValueError(
                     "All rows must contain the same columns."
                 )
-
-        # Build query
 
         query = sql.SQL(
             """
@@ -985,8 +973,6 @@ def anonymize_and_insert_rows(
             ),
         )
 
-        # Prepare values
-
         values = [
             tuple(
                 row[column]
@@ -994,8 +980,6 @@ def anonymize_and_insert_rows(
             )
             for row in anonymized_rows
         ]
-
-        # Insert
 
         with get_connection(database) as conn:
 
@@ -1076,6 +1060,7 @@ def anonymized_delete(
     except Exception as exc:
         _handle_exception("anonymized_delete", exc)
 
+
 @mcp.tool()
 def create_table(
     database: str,
@@ -1107,14 +1092,12 @@ def create_table(
         if not columns:
             raise ValueError("columns cannot be empty.")
 
-        # Basic table-name validation
         if not table.replace("_", "").isalnum():
             raise ValueError(
                 "Table name can contain only letters, "
                 "numbers, and underscores."
             )
 
-        # Build column definitions
         column_definitions = []
 
         for column_name, column_type in columns.items():
@@ -1290,7 +1273,6 @@ def alter_table(
         _handle_exception("alter_table", exc)
 
 
-
 @mcp.tool()
 def upsert_row(
     database: str,
@@ -1395,6 +1377,6 @@ def upsert_row(
     except Exception as exc:
         _handle_exception("upsert_row", exc)
 
-# SERVER START
+
 if __name__ == "__main__":
     mcp.run()

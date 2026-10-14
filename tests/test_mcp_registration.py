@@ -1,14 +1,19 @@
-"""Tests for the MCP tool registry and the MCP protocol call path."""
+
 
 import asyncio
 
+
 import pytest
+
 
 from mcp.server.mcpserver.exceptions import UnexpectedToolError
 
+
 import server
 
+
 pytestmark = pytest.mark.requires_postgres
+
 
 EXPECTED_TOOLS = [
     "list_databases",
@@ -76,8 +81,6 @@ def test_call_tool_returns_structured_result():
 
 
 def test_call_tool_propagates_validation_error_to_the_client():
-    # MCPServer wraps any tool exception; the original error stays attached as
-    # the cause so the client can still read the real message.
     with pytest.raises(UnexpectedToolError) as excinfo:
         asyncio.run(
             server.mcp.call_tool(
